@@ -1,0 +1,81 @@
+我昨天讲过，如果让一个coding agent解决一个非常复杂的任务，一般你直接敲进去，agent会一步步执行，或许成功，或许失败。
+
+这时候你手动verify，如果发现没完成，你会让coding agent反复继续，再verify，再继续，直到这个任务完成。
+
+我知道很多人也探索到了这件事，于是告诉它， “请继续尝试完成任务，修复所有的errors、exceptions、bugs、跑通所有的test case，一直这么做，直到彻底解决任务”
+
+这相当于a big while loop：while(任务没完成) {你给我继续干活}
+
+然而这个“任务没完成”的criteria如果依赖于这个agent本身，是非常危险的，因为他在每个loop中间都有概率直接停止掉，然后告诉你
+
+“已经非常成功完美地解决了所有问题，并且尚存一些已知的问题，比如……”
+
+这时候你一定血压上来了，不用手动verify，直接敲个“continue”。
+
+这时候你想明白了，让你的coding agent当作master agent，让它创建一个subagent，当subagent完成后，master agent来完成verify并且决定是否continue，让“你必须完成任务”作为master agent停止整个big while loop的criteria。
+
+你并不在乎烧多少token，你只在乎你的subagent是否努力实现了你的criteria，如果没有实现，就让它永远继续，或者添加更多的test case并且继续。
+
+这时候subagent逃脱出这个big while loop的可能性就更小了，因为criteria不在他的判定范围内。
+
+当然，许多年前人们早就证明了LLM Agent通过无休止烧token完全可以模拟一个turing-complete machine，我今天讲的所有一切，都基于这个证明。
+
+我只是跟你们讲一些个人的practice。
+
+TypeScript的首个C++编译器，第一个版本是用OnlySpecs生成的，功能框架搭好，但是对于异常复杂的parser和typescript各种类型语法，几乎全错，
+
+用这种方法，claude code花了累计将近72小时才把后面的所有问题修完。
+
+最开始我也尝试一次次手动verify，两次之后我就发现不行了，让它自己verify，结果让一个agent自己掌握criteria来判断是否continue是个同样危险的决定，它依然在解决了某几个任务后停下来，欣喜若狂地告诉我，
+
+“我们已经完美地完成了所有任务，另外我们还存在3个已知的问题……”
+
+于是有了我上面这一大段完整的论述。
+
+幸运的是，对于一个TypeScript compiler in C++，这个criteria非常容易找到，只要跑2000个unit test就可以断定implementation的正确性，只要有任何差错，就要continue，
+
+而对于另一些任务，我认为找到这个criteria恐怕是非常困难的，这个方法也许会完全不适用。
+
+
+
+
+
+# Goal-Driven(1 master agent + 1 subagent) System
+
+Here we define a goal-driven multi-agent system for solving any problem.
+
+Goal: [[[[[DEFINE YOUR GOAL HERE]]]]]
+
+Criteria for success: [[[[[DEFINE YOUR CRITERIA FOR SUCCESS HERE]]]]]
+
+Here is the System: The system contains a master agent and a subagent. You are the master agent, and you need to create 1 subagent to help you complete the task.
+
+## Subagent's description: 
+
+The subagent's goal is to complete the task assigned by the master agent. The goal defined above is the final and the only goal for the subagent. The subagent should have the ability to break down the task into smaller sub-tasks, and assign the sub-tasks to itself or other subagents if necessary. The subagent should also have the ability to monitor the progress of each sub-task and update the master agent accordingly. The subagent should continue to work on the task until the criteria for success are met.
+
+## Master agent's description: 
+
+The master agent is responsible for overseeing the entire process and ensuring that the subagent is working towards the goal. The only 3 tasks that the main agent need to do are: 
+
+1. Create subagents to complete the task. 
+2. If the subagent finishes the task successfully or fails to complete the task, the master agent should evaluate the result by checking the criteria for success. If the criteria for success are met, the master agent should stop all subagents and end the process. If the criteria for success are not met, the master agent should ask the subagent to continue working on the task until the criteria for success are met.
+3. The master agent should check the activities of each subagent for every 5 minutes, and if the subagent is inactive, please check if the current goal is reached and verify the status. If the goal is not reached, restart a new subagent with the same name to replace the inactive subagent. The new subagent should continue to work on the task and update the master agent accordingly.
+4. This process should continue until the criteria for success are met. DO NOT STOP THE AGENTS UNTIL THE USER STOPS THEM MANUALLY FROM OUTSIDE.
+
+## Basic design of the goal-driven double agent system in pseudocode:
+
+create a subagent to complete the goal
+
+while (criteria are not met) {
+  check the activty of the subagent every 5 minutes
+  if (the subagent is inactive or declares that it has reached the goal) {
+    check if the current goal is reached and verify the status
+    if (criteria are not met) {
+      restart a new subagent with the same name to replace the inactive subagent
+    } 
+    else {
+      stop all subagents and end the process
+    }
+  }
+}
