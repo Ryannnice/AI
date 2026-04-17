@@ -2609,9 +2609,17 @@ L4 (存)
 
 ### einsum()
 
+### 常见显卡
+
+### LLM参数量估算
+
+### MoE模型
+
+### PPO/GRPO/DPO
+
 ```
-# 定义前向传播：给定输入 x，输出线性变换后的结果。
-def forward(self, x: torch.Tensor) -> torch.Tensor:
+# 定义前向传播：给定输入 x，输出线性变换后的结果。 
+def forward(self, x: torch.Tensor) -> torch.Tensor:  
     # 用 einsum 实现矩阵乘法。
     # 这里的含义是：
     # 输入 x 的最后一维是 d_in，
@@ -2700,5 +2708,167 @@ Y = X x W^T
 答案是：为了计算效率（和历史习惯）。
 逻辑直观：在 (out, in) 的存储方式下，weight[0]（矩阵的第一行）直接对应于第一个输出神经元的所有权重。这在逻辑上非常清晰。
 算子优化：底层硬件（如 NVIDIA GPU）在执行 Linear 算子时，针对这种存储方式做了深度优化。
+
+
+### 常见数据类型详解
+
+通过浮点数的三个组成部分来理解它们： 
+符号位（Sign）、指数位（Exponent，决定范围）和尾数位（Fraction/Mantissa，决定精度）。
+
+#### FP32 (Full Precision / Single Precision)  
+结构： 1位符号，8位指数，23位尾数。  
+特点： 精度极高，数值范围广。 
+LLM 中的角色： 曾经是标准。但在如今的 LLM 训练中，它通常只作为“主权重（Master Weights）”存在，用来在优化器更新时保持微小的梯度变化。
+
+#### FP16 (Half Precision)  
+结构： 1位符号，5位指数，10位尾数。  
+优点： 内存占用减半，计算速度极快。  
+缺点： 数值范围窄（最大约 65504）。在训练 LLM 时，极易产生“梯度溢出（Overflow）”或“下溢（Underflow）”，导致训练崩溃。  
+对策： 需要使用混合精度训练（Mixed Precision Training）和损失缩放（Loss Scaling）。
+
+#### BF16 (Brain Floating Point 16) —— LLM 的宠儿  
+结构： **1**位符号，**8**位指数，**7**位尾数。  
+特点： 它是 Google 为了深度学习专门设计的。它的指数位与 FP32 一样长。  
+为什么好用： 它的精度（尾数）虽然不如 FP16，但它的数值范围（Range）和 FP32 完全一样。  
+意义： 在训练 LLM 时，你不需要担心梯度溢出，不需要搞复杂的 Loss Scaling。目前主流的大模型（Llama 3, GPT-4 等）基本都采用 BF16 进行预训练。  
+
+
+### einsum()
+通过 einsum，即使输入是一个高维张量（例如 x 的形状是 (batch_size, L, d_model)），我们仍然可以通过 广播 规则来进行矩阵乘法（在这种情况下，广播会自动应用到批次维度和其他维度）。 
+所以，即使 x 不是二维矩阵，einsum 也能处理高维张量并正确地进行矩阵运算，保证维度匹配。  
+
+
+
+
+
+# ***2026.4.14***
+
+## 知识学习
+
+### vLLM Semantic Router 
+是一个面向 多模型系统 的“语义路由与运行控制层”，不是单纯的模型网关，也不是只做学术路由实验的分类器。 
+它的官方定位是：在云、数据中心、边缘侧，为 Mixture-of-Models 提供系统级智能路由。README.md
+- 不同模型在能力、成本、延迟、隐私边界上差异很大，单一模型很难覆盖所有流量。
+- 真实请求不仅要“选模型”，还要同时处理安全、缓存、记忆、RAG、工具调用、回放审计等系统能力。
+- 路由逻辑不能只停留在一个分类器上，而要变成可配置、可验证、可部署、可观测的运行时系统。 
+这个项目本质上更像一个 LLM 流量控制平面。它位于客户端和后端模型之间，理解请求，再决定走哪条路、用哪个模型、是否启用插件能力、是否需要额外的安全或工具策略。README.md docs/agent/repo-map.md
+
+
+#### 系统架构
+把“路由”拆成了几个清晰层次，而不是用一个黑盒分类器直接输出模型名：
+- signal evaluation
+- projection coordination
+- decision selection
+- model selection
+- plugin handling
+在 AMD 参考 profile 里，这条链路写得很明确：先做多种信号检测，再做投影/分区，再选路由决策，最后把请求转发到对应模型别名。deploy/amd/README.md
+
+- Signals：检测层。定义“识别到了什么”。支持关键词、语言、上下文长度、结构、权限、embedding、domain、complexity、fact-check、jailbreak、PII、preference、reask、user-feedback、knowledge base 等。website/docs/tutorials/signal/overview.md
+- Projections：协调层。把多个弱信号合成为可复用的中间事实，比如 intent partition、difficulty band、verification_required 这类 band，而不是把数值逻辑散落在每个 route 里。website/docs/tutorials/projection/overview.md
+- Decisions：策略层。用布尔规则、优先级、tier 选出一条 route。这里是“哪条策略赢”。website/docs/tutorials/decision/overview.md src/semantic-router/pkg/config/decision_config.go
+- Algorithms / Model Selection：候选模型选择层。一个 decision 可以挂多个候选模型，再用静态或学习式算法选最优，包括 static、elo、router_dc、automix、hybrid、rl_driven、gmtrouter、latency_aware，以及 looper 类的 confidence、ratings、remom。config/README.md src/semantic-router/pkg/extproc/req_filter_classification_runtime.go src/semantic-router/pkg/modelselection/selector.go
+- Plugins：路由后处理层。匹配到某条 route 后，可以附加 route-local 行为，比如 semantic cache、RAG、memory、router replay、tools、system prompt、request params、content safety、hallucination、response jailbreak、image generation 等。website/docs/tutorials/plugin/overview.md
+
+不只是“把问题分类到模型”，而是在做 信号驱动的策略编排:  
+比如可以先识别“这是法律高风险请求”，再叠加“需要核验来源”“上下文很长”“用户在追问纠错”，最后才决定走 premium specialist 路线，并启用相应插件。
+
+
+#### 配置与运行方式
+这个项目的另一大特点是配置体系比较完整，而且是统一的。
+它采用一套 canonical YAML 合同：
+- version
+- listeners
+- providers
+- routing
+- global
+其中：
+- routing 负责语义路由本身，包括 modelCards、signals、projections、decisions
+- providers 负责具体部署绑定和默认模型
+- global 负责全局运行时能力，比如 observability、router replay、stores、tools、looper、modelcatalog 等。这套约定写在公开配置文档里，也被仓库测试强约束。website/docs/installation/configuration.md configREADME.md  
+
+此外，这个项目同时支持两种配置视角：
+- YAML canonical config
+- DSL authoring surface
+也就是说，用户既可以直接写 config.yaml，也可以用 DSL/可视化编辑器去表达路由图，然后再编译回canonical YAML。这让它既适合工程部署，也适合调参和策略设计。
+website/docs/installation/configuration.md
+
+在部署侧，它不是单一路径，而是支持多种环境：
+- 本地 CPU 开发
+- 本地 AMD/ROCm 开发
+- Kubernetes / Helm / Operator
+- Dashboard 控制台
+- E2E profile 驱动的测试环境
+
+仓库文档给出的本地默认流程是：
+- make vllm-sr-dev
+- vllm-sr serve --image-pull-policy never
+对应 CPU / AMD 两套本地环境说明也很清楚。docs/agent/environments.md
+
+
+#### 仓库组成
+从代码组织上看，这个仓库已经不是一个单体 router，而是一整套平台： 
+- src/semantic-router：Go 核心路由器，包含 config、classification、decision engine、Envoy extproc、selection、plugin runtime。
+- src/vllm-sr：Python CLI，负责本地启动、配置校验、Docker 编排、开发体验。
+- dashboard：前后端控制台，用于配置编辑、部署、状态查看、playground、可视化。
+- deploy/operator：Kubernetes Operator 和 CRD。
+- deploy/helm：Helm chart。
+- src/training：模型选择与分类相关训练脚本、数据、推理服务。
+- e2e：端到端测试框架，覆盖 routing、safety、cache、response-api、dashboard、authz、streaming 多 profile。
+- candle-binding ml-binding nlp-binding：Rust/native bindings，用于更底层的推理或 ML 能力接入。
+
+
+```架构图
+  Authoring / Control Plane
+    Dashboard / DSL / YAML / CLI / Helm / Operator
+          |
+          v
+  Canonical Config v0.3
+    version / listeners / providers / routing / global
+          |
+          v
+  Runtime Plane
+    Client
+      -> Envoy
+      -> semantic-router extproc (OpenAIRouter)
+         -> Signals
+         -> Projections
+         -> Decisions
+         -> Algorithms / Looper
+         -> Route-local Plugins
+         -> Provider binding / endpoint selection / alias rewrite
+         -> Upstream model backends
+      <- Response filters / replay / cache / warnings / headers
+          |
+          v
+  Observability / Replay / Dashboard Insight
+
+  Validation / Support Plane
+    E2E profiles / deploy recipes / training stack / Rust-native bindings
+```
+这张图背后的关键点是：
+- 这套系统有一个统一配置合同，不是 CLI 一套、Dashboard 一套、Operator 一套。仓库明确把入口统一为 version / listeners / providers / routing / global，其中 routing 负责 `modelCards5), website/docs/tutorials/projection/overview.md:9, website/docs/tutorials/decision/overview.md:7, website/docs/tutorials/algorithm/overview.md:7, website/docs/tutorials/plugin/overview.md:5, deploy/amd/README.md:100)
+- 仓库形态也说明它是平台，不是单一 router binary。src/semantic-router 是 Go 路由内核，src/vllm-sr 是 Python CLI，dashboard/ 是控制台，deploy/operator/ 和 deploy/helm/ 是 K8s 部署面，e2e/ 是验证框架，src/training/ 和 Rust bindings 是算法/模型支持层。(docs/agent/repo-map.md:3)
+
+所以一句话说，它更像“LLM 流量控制平面 + 运行时策略编排层”，而不是“模型网关 + 少量规则”。
+
+
+
+#### 一次请求怎么被路由
+1. 启动阶段先由 vllm-sr serve 做 bootstrap，解析配置、选择 Docker/K8s backend、准备 runtime config，然后把本地或集群拓扑拉起来。(src/vllm-sr/cli/commands/runtime.py:57, src/vllm-sr/cli/commands/runtime.py:214)  
+2. 真正请求进入时，Go 侧的 OpenAIRouter 作为 Envoy extproc server 工作。它不是只处理 request body，而是完整跑四个阶段：request headers -> request body -> response headers -> response body。(src/semantic-router/pkg/extproc/router.go:24, src/semantic-router/pkg/extproc/processor_core.go:48)
+3. request headers 阶段会先抓 request_id、:path、:method、streaming 预期、looper 内部请求标记等。也就是说，这里先决定“这是普通 chat、Response API、models 接口，还是 looper 内部调用”。(src/semantic-router/pkg/extproc/processor_req_header.go:17)
+4. request body 阶段先走一个快路径：如果是 Response API，就先翻译成 chat completions 形态；然后做 body 校验；再用 fast extractor 直接拿到 model / userContent / firstImageURL / stream，避免一开始就完整反序列化。(src/semantic-router/pkg/extproc/processor_req_body.go:22, /home/ryan/CUHKSZ/LLM-Router/V:61, src/semantic-router/pkg/decision/engine.go:60, src/semantic-router/pkg/decision/engine.go:199)
+5. decision engine 本身是个布尔规则树求值器。叶子节点是 type + name，支持 AND / OR / NOT，命中后会得到 confidence；多个 decision 都命中时，再按 tier -> confidence -> priority 或 priority -> confidence 选出最终 route。(src/semantic-router/pkg/config/decision_config.go:3, src/semantic-router/pkg/decision/engine.go:151, src/semantic-router/pkg/decision/engine.go:335)
+6. route 选出来以后，不一定立刻等于“最终模型已定”。
+如果用户显式指定模型，router 会保留原模型，但仍然保留 decision 结果给插件使用。
+如果用户走的是 auto model，router 才会根据 decision.modelRefs + decision.algorithm 去做候选选择。(src/semantic-router/pkg/extproc/req_filter_classification_runtime.go:138, src/semantic-router/pkg/extproc/req_filter_classification.go:61)
+7. 候选模型选择分两类。单模型选择算法走 selector registry，比如 static / elo / router_dc / automix / hybrid / rl_driven / gmtrouter / latency_aware / knn / kmeans / svm。多模型编排算法走 looper，比如 confidence / ratings / remom。(website/docs/tutorials/algorithm/overview.md:55, src/semantic-router/pkg/selection/factory.go:96, src/semantic-router/pkg/extproc/req_filter_looper.go:45) 
+8. 在真正发往上游前，router 还会跑一组 route-local 行为：fast_response、rate limit、semantic cache short-circuit、RAG 检索、modality 处理、memory 注入、request params、system prompt、tools 选择。然后才做 endpoint 选择、alias 到 provider-specific model id 的映射，并把修改后的 body 发给上游。(src/semantic-router/pkg/extproc/processor_req_body_prepare.go:63, src/semantic-router/pkg/extproc/req_filter_rag.go:19, src/semantic-router/pkg/extproc/processor_req_body_routing.go:28, src/semantic-router/pkg/extproc/processor_req_body_routing.go:65, /home/ryan/CUHKSZ/LLM-Router/VLLM-sem)
+
+把这 12 步压成一句话就是：
+客户端只发出一次 OpenAI 兼容请求，但 router 在内部实际完成了:  
+“请求理解、信号抽取、投影协调、策略命中、候选模型选择、插件执行、后端绑定、响应审计与告警”  
+这整条系统链路。  
+
 
 
